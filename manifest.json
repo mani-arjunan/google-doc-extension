@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "MoveToDoc",
+  "description": "Extension that includes a popup and requests host permissions and storage permissions .",
+  "version": "1.0",
+  "icons": {},
+  "action": {
+    "default_popup": "index.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["script.js"]
+    }
+  ],
+  "host_permissions": ["http://localhost:8080/"],
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "tabs",
+    "cookies",
+    "clipboardRead",
+    "clipboardWrite"
+  ]
+}
