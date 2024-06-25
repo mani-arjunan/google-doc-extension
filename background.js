@@ -14,19 +14,17 @@ const makeRequest = async (url, method, payload, additionalHeaders) => {
         }
       : { ...additionalHeaders };
   return new Promise(async (res, rej) => {
-    const response = await fetch(url, {
-      method,
-      body: payload,
-      headers,
-      credentials: "include",
-    });
-    if (response.status >= 400 && response.status <= 500) {
-      rej(await response.json());
-      return;
+    try {
+      const response = await fetch(url, {
+        method,
+        ...(payload && { body: JSON.stringify(payload) }),
+        headers,
+        credentials: "include",
+      });
+      res(await response.json());
+    } catch (e) {
+      console.log(e);
     }
-    const data = await response.json();
-
-    res(data);
   });
 };
 
@@ -35,6 +33,23 @@ async function getCookie() {
 
   return new Promise((res) => {
     chrome.cookies.get(
+      { url: SERVER_URL, name: COOKIE_NAME },
+      function (cookie) {
+        if (cookie) {
+          res(cookie.value);
+        } else {
+          res("");
+        }
+      },
+    );
+  });
+}
+
+async function deleteCookie() {
+  const COOKIE_NAME = "google-auth-token";
+
+  return new Promise((res) => {
+    chrome.cookies.remove(
       { url: SERVER_URL, name: COOKIE_NAME },
       function (cookie) {
         if (cookie) {
@@ -67,23 +82,37 @@ chrome.runtime.onInstalled.addListener(async () => {
   await chrome.contextMenus.removeAll();
   const cookie = await getCookie();
   if (cookie) {
+    const { refreshToken, userId } = JSON.parse(decodeURIComponent(cookie));
+
+    // Rare case, but handled
+    if (!refreshToken || !userId) {
+      alert("Error");
+      showGoogleLogin();
+      return;
+    }
+
     try {
       const data = await makeRequest(
         `${SERVER_URL}/list-docs`,
         "POST",
-        decodeURIComponent(cookie),
+        {
+          userId,
+        },
+        {
+          authorization: "Bearer " + refreshToken,
+        },
       );
-      createContextMenus(data);
+      if (!data.error) {
+        createContextMenus(data);
+      }
     } catch (e) {}
   }
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  console.log(info, tab);
   const { menuItemId, frameUrl, selectionText } = info;
   const cookie = await getCookie();
 
-  console.log(info, tab);
   try {
     const data = await makeRequest(
       `${SERVER_URL}/append-to-doc`,
@@ -100,9 +129,52 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-chrome.runtime.onMessage.addListener(async (message, sender, sendMessage) => {
-  await chrome.contextMenus.removeAll();
-  if (Array.isArray(message)) {
-    createContextMenus(message);
+async function logout() {
+  const cookie = await getCookie();
+  if (cookie) {
+    const { refreshToken, userId } = JSON.parse(decodeURIComponent(cookie));
+
+    // Rare case, but handled
+    if (!refreshToken || !userId) {
+      return;
+    }
+    try {
+      await makeRequest(
+        `${SERVER_URL}/logout`,
+        "POST",
+        {
+          userId,
+        },
+        {
+          authorization: "Bearer " + refreshToken,
+        },
+      );
+    } catch (e) {}
   }
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendMessage) => {
+  chrome.contextMenus.removeAll().then(async () => {
+    if (message === "get-cookies") {
+      const cookie = await getCookie();
+      sendMessage(cookie);
+    } else if (message === "clear-cookies-if-present") {
+      await deleteCookie();
+      createContextMenus([]);
+      chrome.runtime.reload();
+    } else if (message === "logout") {
+      await logout();
+      await deleteCookie();
+      createContextMenus([]);
+      chrome.runtime.reload();
+    } else {
+      if (Array.isArray(message)) {
+        createContextMenus(message);
+      }
+    }
+
+    return true;
+  });
+
+  return true;
 });

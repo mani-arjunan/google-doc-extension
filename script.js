@@ -1,6 +1,5 @@
-const SERVER_URL = "http://localhost:8080";
-
 function getGoogleAuthURL() {
+  const SERVER_URL = "http://localhost:8080";
   const CLIENT_ID = "733584878721-pfvg1kv047ujg7r3ko2b8j565klducj9";
   const rootUrl = "https://accounts.google.com/o/oauth2/v2/auth";
 
@@ -24,7 +23,6 @@ function getGoogleAuthURL() {
 }
 
 const sendMessageToBg = (payload) => {
-  console.log(payload);
   chrome.runtime.sendMessage(payload);
 };
 
@@ -36,35 +34,30 @@ const makeRequest = async (url, method, payload, additionalHeaders) => {
           ...additionalHeaders,
         }
       : { ...additionalHeaders };
+
   return new Promise(async (res, rej) => {
     try {
       const response = await fetch(url, {
         method,
-        body: payload,
+        ...(payload && { body: JSON.stringify(payload) }),
         headers,
         credentials: "include",
       });
 
       try {
-        if (response.status >= 400 && response.status <= 500) {
-          rej(await response.json());
-          return;
-        }
-        const data = await response.json();
-        res(data);
+        res(await response.json());
       } catch (e) {
         switchLoader(false);
         alert("Unable to convert response to JSON. Please try again");
-        console.log(e);
       }
     } catch (e) {
+      chrome.runtime.sendMessage("clear-cookies-if-present");
       switchLoader(false);
-      alert("Unable to connect to server. Please try again");
     }
   });
 };
 
-function createFormInput(parent, cb, logoutCb) {
+function createFormInput(parent, cb) {
   const inputWrapperDiv = document.createElement("div");
   const submitWrapperDiv = document.createElement("div");
   const input = document.createElement("input");
@@ -86,8 +79,10 @@ function createFormInput(parent, cb, logoutCb) {
   parent.appendChild(submitWrapperDiv);
 
   submit.addEventListener("click", () => cb(input));
-  logout.addEventListener("click", logoutCb);
-  chrome.runtime.sendMessage("logout");
+  logout.addEventListener("click", () => {
+    switchLoader(true);
+    chrome.runtime.sendMessage("logout");
+  });
 }
 
 function createLi(title, href) {
@@ -117,19 +112,10 @@ function createFormList(data, ul, parent) {
 }
 
 async function getCookie() {
-  const COOKIE_NAME = "google-auth-token";
-
   return new Promise((res) => {
-    chrome.cookies.get(
-      { url: SERVER_URL, name: COOKIE_NAME },
-      function (cookie) {
-        if (cookie) {
-          res(cookie.value);
-        } else {
-          res("");
-        }
-      },
-    );
+    chrome.runtime.sendMessage("get-cookies", (cookie) => {
+      res(cookie);
+    });
   });
 }
 
@@ -147,7 +133,24 @@ function transformData(data) {
   });
 }
 
+function showGoogleLogin() {
+  const googleAuthURL = getGoogleAuthURL();
+  const button = document.createElement("button");
+  button.setAttribute("id", "googleButton");
+
+  const a = document.createElement("a");
+  a.setAttribute("href", googleAuthURL);
+  a.setAttribute("target", "_blank");
+  a.innerText = "Google Login";
+  a.style.textDecoration = "none";
+
+  button.appendChild(a);
+
+  body.appendChild(button);
+}
+
 async function main() {
+  const SERVER_URL = "http://localhost:8080";
   switchLoader(true);
   const cookie = await getCookie();
   switchLoader(false);
@@ -155,12 +158,48 @@ async function main() {
 
   if (cookie) {
     switchLoader(true);
+    const { refreshToken, userId } = JSON.parse(decodeURIComponent(cookie));
+
+    // Rare case, but handled
+    if (!refreshToken || !userId) {
+      alert("Error");
+      switchLoader(false);
+      showGoogleLogin();
+      return;
+    }
+
     const data = await makeRequest(
       `${SERVER_URL}/list-docs`,
       "POST",
-      decodeURIComponent(cookie),
+      {
+        userId,
+      },
+      {
+        authorization: "Bearer " + refreshToken,
+      },
     );
     switchLoader(false);
+    if (data.error) {
+      const action = {
+        EXPIRED: function () {
+          alert("Session Expired! Login Again");
+          chrome.runtime.sendMessage("clear-cookies-if-present");
+        },
+        AUTH_CODE_NOT_FOUND: function () {
+          alert("Error! Login Again");
+          chrome.runtime.sendMessage("clear-cookies-if-present");
+        },
+        USER_NOT_FOUND: function () {
+          alert("User not found! Login Again");
+          chrome.runtime.sendMessage("clear-cookies-if-present");
+        },
+      };
+
+      action[data.code] && action[data.code]();
+
+      showGoogleLogin();
+      return;
+    }
 
     const formWrapperDiv = document.createElement("div");
     formWrapperDiv.setAttribute("class", "formWrapper");
@@ -170,14 +209,43 @@ async function main() {
 
     const callback = async function (input) {
       switchLoader(true);
-      const data = await makeRequest(
+      const { refreshToken, userId } = JSON.parse(decodeURIComponent(cookie));
+
+      // Rare case, but handled
+      if (!refreshToken || !userId) {
+        alert("Error");
+        switchLoader(false);
+        showGoogleLogin();
+        return;
+      }
+      const response = await makeRequest(
         `${SERVER_URL}/create-doc`,
         "POST",
-        JSON.stringify({
+        {
           docName: input.value,
-          ...JSON.parse(decodeURIComponent(cookie)),
-        }),
+          userId,
+        },
+        {
+          authorization: "Bearer " + refreshToken,
+        },
       );
+
+      if (response.error) {
+        const action = {
+          OTHER_ERROR: function () {
+            alert("Internal Server Error! Login again");
+          },
+          SCOPE_NOT_DEFINED: function () {
+            alert("Try to logout and login again with permitting valid scopes");
+          },
+        };
+        action[response.code] && action[response.code]();
+
+        switchLoader(false);
+        return;
+      }
+
+      const { data } = response;
 
       if (data.length === 1) {
         createFormList(transformData(data), ol, formWrapperDiv);
@@ -193,36 +261,13 @@ async function main() {
       switchLoader(false);
     };
 
-    const logoutCallback = async () => {
-      switchLoader(true);
-      await makeRequest(
-        `${SERVER_URL}/logout`,
-        "POST",
-        decodeURIComponent(cookie),
-      );
-      switchLoader(false);
-      window.close();
-    };
-
-    createFormInput(formWrapperDiv, callback, logoutCallback);
+    createFormInput(formWrapperDiv, callback);
 
     if (data.length != 0) {
       createFormList(transformData(data), ol, formWrapperDiv);
     }
   } else {
-    const googleAuthURL = getGoogleAuthURL();
-    const button = document.createElement("button");
-    button.setAttribute("id", "googleButton");
-
-    const a = document.createElement("a");
-    a.setAttribute("href", googleAuthURL);
-    a.setAttribute("target", "_blank");
-    a.innerText = "Google Login";
-    a.style.textDecoration = "none";
-
-    button.appendChild(a);
-
-    body.appendChild(button);
+    showGoogleLogin();
   }
 }
 
