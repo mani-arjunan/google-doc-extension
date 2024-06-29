@@ -22,10 +22,6 @@ function getGoogleAuthURL() {
   return `${rootUrl}?${qs.toString()}`;
 }
 
-const sendMessageToBg = (payload) => {
-  chrome.runtime.sendMessage(payload);
-};
-
 const makeRequest = async (url, method, payload, additionalHeaders) => {
   const headers =
     method === "POST"
@@ -51,7 +47,7 @@ const makeRequest = async (url, method, payload, additionalHeaders) => {
         alert("Unable to convert response to JSON. Please try again");
       }
     } catch (e) {
-      chrome.runtime.sendMessage("clear-cookies-if-present");
+      chrome.runtime.sendMessage({ action: "clear-cookies-if-present" });
       switchLoader(false);
     }
   });
@@ -81,7 +77,7 @@ function createFormInput(parent, cb) {
   submit.addEventListener("click", () => cb(input));
   logout.addEventListener("click", () => {
     switchLoader(true);
-    chrome.runtime.sendMessage("logout");
+    chrome.runtime.sendMessage({ action: "logout" });
   });
 }
 
@@ -113,9 +109,20 @@ function createFormList(data, ul, parent) {
 
 async function getCookie() {
   return new Promise((res) => {
-    chrome.runtime.sendMessage("get-cookies", (cookie) => {
+    chrome.runtime.sendMessage({ action: "get-cookies" }, (cookie) => {
       res(cookie);
     });
+  });
+}
+
+async function createDoc(docName) {
+  return new Promise((res) => {
+    chrome.runtime.sendMessage(
+      { action: "create-doc", data: docName },
+      (data) => {
+        res(data);
+      },
+    );
   });
 }
 
@@ -183,15 +190,15 @@ async function main() {
       const action = {
         EXPIRED: function () {
           alert("Session Expired! Login Again");
-          chrome.runtime.sendMessage("clear-cookies-if-present");
+          chrome.runtime.sendMessage({ action: "clear-cookies-if-present" });
         },
         AUTH_CODE_NOT_FOUND: function () {
           alert("Error! Login Again");
-          chrome.runtime.sendMessage("clear-cookies-if-present");
+          chrome.runtime.sendMessage({ action: "clear-cookies-if-present" });
         },
         USER_NOT_FOUND: function () {
           alert("User not found! Login Again");
-          chrome.runtime.sendMessage("clear-cookies-if-present");
+          chrome.runtime.sendMessage({ action: "clear-cookies-if-present" });
         },
       };
 
@@ -209,26 +216,7 @@ async function main() {
 
     const callback = async function (input) {
       switchLoader(true);
-      const { refreshToken, userId } = JSON.parse(decodeURIComponent(cookie));
-
-      // Rare case, but handled
-      if (!refreshToken || !userId) {
-        alert("Error");
-        switchLoader(false);
-        showGoogleLogin();
-        return;
-      }
-      const response = await makeRequest(
-        `${SERVER_URL}/create-doc`,
-        "POST",
-        {
-          docName: input.value,
-          userId,
-        },
-        {
-          authorization: "Bearer " + refreshToken,
-        },
-      );
+      const response = await createDoc(input.value);
 
       if (response.error) {
         const action = {
@@ -257,7 +245,6 @@ async function main() {
         );
         ol.appendChild(li);
       }
-      sendMessageToBg(data);
       switchLoader(false);
     };
 

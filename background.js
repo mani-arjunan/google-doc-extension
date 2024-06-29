@@ -13,6 +13,7 @@ const makeRequest = async (url, method, payload, additionalHeaders) => {
           ...additionalHeaders,
         }
       : { ...additionalHeaders };
+
   return new Promise(async (res, rej) => {
     try {
       const response = await fetch(url, {
@@ -113,19 +114,34 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const { menuItemId, frameUrl, selectionText } = info;
   const cookie = await getCookie();
 
-  try {
-    const data = await makeRequest(
-      `${SERVER_URL}/append-to-doc`,
-      "POST",
-      JSON.stringify({
-        docId: menuItemId,
-        sourceUrl: frameUrl,
-        selectionText,
-        ...JSON.parse(decodeURIComponent(cookie)),
-      }),
-    );
-  } catch (e) {
-    console.error("ERROR");
+  if (cookie) {
+    const { refreshToken, userId } = JSON.parse(decodeURIComponent(cookie));
+
+    // Rare case, but handled
+    if (!refreshToken || !userId) {
+      return;
+    }
+    try {
+      const data = await makeRequest(
+        `${SERVER_URL}/append-to-doc`,
+        "POST",
+        {
+          userId,
+          docId: menuItemId,
+          sourceUrl: frameUrl,
+          selectionText,
+        },
+        {
+          authorization: "Bearer " + refreshToken,
+        },
+      );
+
+      if (data.error) {
+        alert(data.error);
+      }
+    } catch (e) {
+      console.error(e);
+    }
   }
 });
 
@@ -153,24 +169,53 @@ async function logout() {
   }
 }
 
+async function createDoc(docName) {
+  const cookie = await getCookie();
+  if (cookie) {
+    const { refreshToken, userId } = JSON.parse(decodeURIComponent(cookie));
+
+    // Rare case, but handled
+    if (!refreshToken || !userId) {
+      return;
+    }
+
+    try {
+      const response = await makeRequest(
+        `${SERVER_URL}/create-doc`,
+        "POST",
+        {
+          docName: docName,
+          userId,
+        },
+        {
+          authorization: "Bearer " + refreshToken,
+        },
+      );
+      return response;
+    } catch (e) {}
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendMessage) => {
+  const { action, data } = message;
+
   chrome.contextMenus.removeAll().then(async () => {
-    if (message === "get-cookies") {
+    if (action === "create-doc") {
+      const response = await createDoc(data);
+      sendMessage(response);
+      createContextMenus(response.data);
+    } else if (action === "get-cookies") {
       const cookie = await getCookie();
       sendMessage(cookie);
-    } else if (message === "clear-cookies-if-present") {
+    } else if (action === "clear-cookies-if-present") {
       await deleteCookie();
       createContextMenus([]);
       chrome.runtime.reload();
-    } else if (message === "logout") {
+    } else if (action === "logout") {
       await logout();
       await deleteCookie();
       createContextMenus([]);
       chrome.runtime.reload();
-    } else {
-      if (Array.isArray(message)) {
-        createContextMenus(message);
-      }
     }
 
     return true;
